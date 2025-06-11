@@ -1,0 +1,152 @@
+Strategy Outline: Two-Level Partitioning
+This document outlines a long-term strategy to ensure high performance and scalability for the Dialog table and its related queries by implementing a two-level partitioning scheme combined with physical data clustering.
+
+1. Architectural Strategy
+The proposed architecture addresses both query performance and long-term data management by treating two classes of tables differently.
+
+Transactional Hierarchy (e.g., Dialog, DialogContent, DialogActivity, Actor)
+
+Two-Level Partitioning: The Dialog table will be partitioned first by RANGE(ContentUpdatedAt) and then sub-partitioned by HASH("Party").
+
+Co-located Partitioning: Tables in a direct parent-child relationship with Dialog (where a child row belongs to exactly one Dialog, directly or indirectly) will be partitioned using the exact same scheme. This requires denormalizing ContentUpdatedAt and Party down to these tables.
+
+Physical Clustering: Each Dialog sub-partition will be physically sorted by ("Party", "ContentUpdatedAt" DESC). Co-partitioned child tables will be clustered by their parent's ID (e.g., DialogId, ActivityId).
+
+Shared Reference Tables (e.g., ActorName, DialogStatus, ActorType)
+
+These tables represent shared entities that are referenced by many dialogs and will not be partitioned. They will remain as standard, monolithic tables. Performance is maintained by joining from a small, pre-filtered set of dialogs into these highly-cached lookup tables.
+
+Indexing & Caching:
+
+A global index on Dialog("Id") will ensure fast direct lookups.
+
+pg_prewarm will be used to keep critical indexes and the newest time-slice partitions in memory.
+
+2. Strategy Justification
+This hybrid strategy was chosen to balance performance, scalability, and data integrity.
+
+Why a Two-Level Partition on Dialog?
+
+It uniquely solves two challenges: The RANGE(ContentUpdatedAt) partition provides efficient data lifecycle management for a 10+ year horizon. The HASH(Party) sub-partition provides excellent query performance by isolating work to tiny data chunks.
+
+Why Co-locate Some Child Tables? (Partition-Wise Joins)
+
+For tables that "belong" to a Dialog (like Actor or DialogContent), co-partitioning enables Partition-Wise Joins. The query planner joins small, corresponding sub-partitions together, which is orders of magnitude faster than joining a small partition against a multi-terabyte table.
+
+Why Not Partition Shared Tables like ActorName?
+
+Entities like ActorName represent shared, normalized data. A single name can be linked to millions of Actor rows across many years. Partitioning it alongside Dialog would create massive data duplication and violate its purpose.
+
+By keeping it as a standard table, we maintain data integrity. Joins remain fast because they are performed after the Dialog table has been filtered down to a very small result set, and ActorName is small enough to be fully cached in RAM.
+
+Why Cluster Child Tables?
+
+Once Dialog lookups are optimized, JOINs become the next bottleneck. By physically sorting a co-partitioned child table by its parent's ID, all its rows related to a set of dialogs are grouped together on disk. This transforms the JOIN operation from random seeks into a fast, sequential scan.
+
+3. Implementation Examples (SQL)
+Below are conceptual examples for creating the partitioned structure and necessary indexes.
+
+a. Define the Partitioned Dialog Table:
+
+-- The new table structure with a two-level partitioning definition.
+-- The primary key must include all partition key columns.
+CREATE TABLE "Dialog" (
+    "Id" uuid NOT NULL,
+    "ContentUpdatedAt" timestamptz NOT NULL,
+    "Party" varchar(255) NOT NULL,
+    -- ... other columns
+    PRIMARY KEY ("Id", "ContentUpdatedAt", "Party")
+) PARTITION BY RANGE ("ContentUpdatedAt");
+
+b. Define a Co-located Partitioned Child Table (e.g., Actor):
+
+-- This table "belongs" to a dialog hierarchy, so it gets co-partitioned.
+-- It must be denormalized to include the partition keys.
+CREATE TABLE "Actor" (
+    -- ... existing Actor columns like Id, Discriminator, ActivityId ...
+    "ContentUpdatedAt" timestamptz NOT NULL, -- Denormalized key
+    "Party" varchar(255) NOT NULL,       -- Denormalized key
+    PRIMARY KEY ("Id", "ContentUpdatedAt", "Party")
+) PARTITION BY RANGE ("ContentUpdatedAt");
+
+(This same partitioning definition would be applied to all tables in the direct transactional hierarchy.)
+
+c. Automate Partition Creation with pg_partman:
+
+This process, including setting up template tables for the HASH sub-partitions, would be configured for Dialog and each of its co-located child tables to ensure the entire structure is managed automatically.
+
+4. Proactive Caching with pg_prewarm
+To ensure the highest possible performance for queries accessing recent data, we can proactively load the "hottest" data into memory.
+
+Strategy: A scheduled script should first warm the most critical indexes, then proceed to warm the data (heap) of the newest time-slice partition(s).
+
+Prioritize Critical Indexes: The first step should always be to pre-warm the global index on Dialog("Id") and the main composite index Dialog("Party", "ContentUpdatedAt" DESC).
+
+Warm Recent Data: After warming the indexes, the script can proceed to warm the newest time-slice partition (e.g., public."Dialog_2025_06"), assuming it fits comfortably in the available cache.
+
+5. Query Performance & Data Model Impact
+This architecture is optimized for our primary use cases but has clear implications for others.
+
+Joins to Co-located Tables (e.g., Actor): These will be extremely fast due to Partition-Wise Joins.
+
+Joins to Shared Tables (e.g., ActorName): These will still be very fast, as they will be indexed lookups from a small, pre-filtered set of dialogs into a well-cached reference table.
+
+Table-per-Hierarchy (TPH): The Actor table is a TPH base table. Because it is part of the transactional hierarchy, applying the partitioning scheme directly to it is the correct and fully compatible approach.
+
+Queries without a Party filter: Performance will be poor. This implies that filtering by Party should be considered a mandatory requirement for all queries against Dialog.
+
+6. Integration with Entity Framework Migrations
+Adopting this partitioned architecture requires a change in how we manage database schema. EF's automatic migration generation is not sufficient for partitioned tables.
+
+Manual Migration Workflow: All schema changes to the Dialog table and its co-located children must be performed manually using raw SQL inside an empty EF migration file.
+
+The Three-Step Rule for Schema Changes: Any ALTER TABLE operation must be applied to three places to ensure consistency:
+
+The Parent Table: (e.g., ALTER TABLE "Dialog" ...) This maintains the logical model.
+
+The pg_partman Template Table: (e.g., ALTER TABLE public.dialog_template ...) This ensures all future partitions are created with the new schema.
+
+All Existing Partitions: A script must loop through all existing partitions and apply the change to ensure historical data is consistent.
+
+Example: Adding a New Column with migrationBuilder.Sql()
+
+// Inside the Up() method of a new, empty EF Migration file.
+
+// Step 1: Alter the parent table
+migrationBuilder.Sql(@"ALTER TABLE ""Dialog"" ADD COLUMN ""NewColumn"" text NULL;");
+
+// Step 2: Alter the pg_partman template table for future partitions
+migrationBuilder.Sql(@"ALTER TABLE public.dialog_template ADD COLUMN ""NewColumn"" text NULL;");
+
+// Step 3: Loop through all existing partitions to apply the change.
+// This script must target both the direct monthly partitions and their hash sub-partitions.
+migrationBuilder.Sql(@"
+    DO $$
+    DECLARE
+        partition_name text;
+    BEGIN
+        FOR partition_name IN
+            SELECT child.relname
+            FROM pg_inherits
+            JOIN pg_class parent ON pg_inherits.inhparent = parent.oid
+            JOIN pg_class child ON pg_inherits.inhrelid = child.oid
+            WHERE parent.relname = 'dialog_template' OR parent.relname = 'Dialog'
+        LOOP
+            EXECUTE format('ALTER TABLE public.%I ADD COLUMN IF NOT EXISTS ""NewColumn"" text NULL;', partition_name);
+        END LOOP;
+    END;
+    $$;
+");
+
+7. Conclusion
+The two-level partitioning scheme provides a robust and powerful framework for achieving high query performance while ensuring long-term scalability. It correctly distinguishes between the transactional data hierarchy (which should be co-partitioned) and shared reference data (which should not).
+
+Successfully implementing this strategy requires accepting key trade-offs and operational changes:
+
+Data Model: The direct Dialog data hierarchy (including tables like Actor) must be denormalized to include the partition keys. Shared lookup tables (ActorName) remain unchanged.
+
+Query Patterns: The architecture's performance relies on queries leveraging the partition keys. A Party identifier will become a mandatory filter for nearly all queries.
+
+Development Workflow: Schema changes for partitioned tables must be managed manually via SQL scripts within EF migrations.
+
+Maintenance: An ongoing commitment to automated partition creation and periodic physical re-clustering is necessary to maintain performance.

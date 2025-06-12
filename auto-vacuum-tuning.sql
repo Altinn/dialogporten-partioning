@@ -22,22 +22,25 @@
 -- Justification: These tables function as high-speed queues. An aggressive
 -- vacuum strategy (low scale factor, moderate threshold) is essential.
 -- Analyze is also made more frequent than the default.
-ALTER TABLE "MassTransitOutboxMessage" SET (
-    autovacuum_enabled = true,
-    autovacuum_vacuum_scale_factor = 0.01,  -- Vacuum after 1% of table is dead
-    autovacuum_vacuum_threshold = 1000,     -- OR after 1000 dead rows
-    autovacuum_analyze_scale_factor = 0.05, -- Analyze after 5% of table changes
-    autovacuum_analyze_threshold = 1000
-);
-
-ALTER TABLE "MassTransitOutboxState" SET (
-    autovacuum_enabled = true,
-    autovacuum_vacuum_scale_factor = 0.01,
-    autovacuum_vacuum_threshold = 1000,
-    autovacuum_analyze_scale_factor = 0.05,
-    autovacuum_analyze_threshold = 1000
-);
-
+DO $$
+DECLARE
+    t_name TEXT;
+    tables_to_tune TEXT[] := ARRAY[
+        'MassTransitOutboxMessage',
+        'MassTransitOutboxState'
+    ];
+BEGIN
+    FOREACH t_name IN ARRAY tables_to_tune
+    LOOP
+        EXECUTE format('ALTER TABLE %I SET (
+            autovacuum_enabled = true,
+            autovacuum_vacuum_scale_factor = 0.01,
+            autovacuum_vacuum_threshold = 1000,
+            autovacuum_analyze_scale_factor = 0.05,
+            autovacuum_analyze_threshold = 1000
+        )', t_name);
+    END LOOP;
+END $$;
 
 -- ====================================================================
 -- Tier 2: Extremely Large Tables (Aggressive ANALYZE, Responsive VACUUM)
@@ -51,34 +54,37 @@ ALTER TABLE "MassTransitOutboxState" SET (
 -- VACUUM: The default 20% scale factor would mean waiting for hundreds of
 -- millions of dead rows. A lower scale factor (1%) and a high fixed
 -- threshold prevents this, ensuring bloat is managed proactively.
-ALTER TABLE "Localization" SET (
-    autovacuum_enabled = true,
-    autovacuum_vacuum_scale_factor = 0.01,
-    autovacuum_vacuum_threshold = 10000,
-    autovacuum_analyze_scale_factor = 0.001
-);
 
-ALTER TABLE "LocalizationSet" SET (
-    autovacuum_enabled = true,
-    autovacuum_vacuum_scale_factor = 0.01,
-    autovacuum_vacuum_threshold = 10000,
-    autovacuum_analyze_scale_factor = 0.001
-);
-
-ALTER TABLE "Dialog" SET (
-    autovacuum_enabled = true,
-    autovacuum_vacuum_scale_factor = 0.01,
-    autovacuum_vacuum_threshold = 10000,
-    autovacuum_analyze_scale_factor = 0.001
-);
-
-ALTER TABLE "DialogSearchTag" SET (
-    autovacuum_enabled = true,
-    autovacuum_vacuum_scale_factor = 0.01,
-    autovacuum_vacuum_threshold = 10000,
-    autovacuum_analyze_scale_factor = 0.02 -- From your original script, this is fine
-);
-
+DO $$
+DECLARE
+    t_name TEXT;
+    tables_to_tune TEXT[] := ARRAY[
+        'Actor',
+        'Attachment',
+        'AttachmentUrl',
+        'DialogGuiAction',
+        'DialogApiAction',
+        'DialogApiActionEndpoint',
+        'DialogContent',
+        'DialogActivity',
+        'DialogTransmission',
+        'DialogTransmissionContent',
+        'DialogEndUserContext',
+        'Dialog',
+        'Localization',
+        'LocalizationSet'
+    ];
+BEGIN
+    FOREACH t_name IN ARRAY tables_to_tune
+    LOOP
+        EXECUTE format('ALTER TABLE %I SET (
+            autovacuum_enabled = true,
+            autovacuum_vacuum_scale_factor = 0.01,
+            autovacuum_vacuum_threshold = 10000,
+            autovacuum_analyze_scale_factor = 0.001
+        )', t_name);
+    END LOOP;
+END $$;
 
 -- ====================================================================
 -- Tier 3: Large Append-Mostly Tables (Responsive ANALYZE & VACUUM)
@@ -95,17 +101,10 @@ DO $$
 DECLARE
     t_name TEXT;
     tables_to_tune TEXT[] := ARRAY[
-        'DialogApiActionEndpoint',
-        'DialogApiAction',
-        'DialogContent',
-        'Attachment',
-        'AttachmentUrl',
-        'Actor',
-        'DialogActivity',
-        'DialogGuiAction',
-        'DialogTransmissionContent',
-        'DialogEndUserContext',
-        'DialogTransmission' -- This was enabled but benefits from tuning
+        'DialogSeenLog',
+        'DialogSearchTag',
+        'ActorName',
+        'DialogServiceOwnerContext'
     ];
 BEGIN
     FOREACH t_name IN ARRAY tables_to_tune
@@ -123,19 +122,15 @@ END $$;
 
 -- ====================================================================
 -- After applying these settings, it is wise to run a manual ANALYZE
--- on the largest tables one last time to ensure the planner has fresh
+-- on the tables one last time to ensure the planner has fresh
 -- stats immediately.
 --
 -- Example:
--- Tier 2 Tables (Most Critical due to size)
--- Analyzing these can take a significant amount of time.
 -- 
 -- ANALYZE VERBOSE public."Localization";
 -- ANALYZE VERBOSE public."LocalizationSet";
 -- ANALYZE VERBOSE public."Dialog";
 -- ANALYZE VERBOSE public."DialogSearchTag";
--- 
--- -- Tier 3 Tables (Large tables)
 -- ANALYZE VERBOSE public."DialogApiActionEndpoint";
 -- ANALYZE VERBOSE public."DialogApiAction";
 -- ANALYZE VERBOSE public."DialogContent";
@@ -147,8 +142,6 @@ END $$;
 -- ANALYZE VERBOSE public."DialogTransmissionContent";
 -- ANALYZE VERBOSE public."DialogEndUserContext";
 -- ANALYZE VERBOSE public."DialogTransmission";
--- 
--- -- Tier 1 Tables (High churn, usually fast to analyze)
 -- ANALYZE VERBOSE public."MassTransitOutboxMessage";
 -- ANALYZE VERBOSE public."MassTransitOutboxState";
 --
@@ -158,4 +151,28 @@ END $$;
 --   SELECT relname, last_autovacuum, last_autoanalyze, n_live_tup, n_dead_tup
 --   FROM pg_stat_user_tables
 --   WHERE relname IN ('Dialog', 'Localization', 'MassTransitOutboxMessage');
+-- 
+-- 
+-- This displays current auto_* settings for all tables
+-- 
+-- SELECT
+--     n.nspname AS schema_name,
+--     c.relname AS table_name,
+--     MAX(CASE WHEN kv.key = 'autovacuum_enabled' THEN kv.value ELSE NULL END) AS autovacuum_enabled,
+--     MAX(CASE WHEN kv.key = 'autovacuum_vacuum_threshold' THEN kv.value ELSE NULL END) AS vacuum_threshold,
+--     MAX(CASE WHEN kv.key = 'autovacuum_vacuum_scale_factor' THEN kv.value ELSE NULL END) AS vacuum_scale_factor,
+--     MAX(CASE WHEN kv.key = 'autovacuum_analyze_threshold' THEN kv.value ELSE NULL END) AS analyze_threshold,
+--     MAX(CASE WHEN kv.key = 'autovacuum_analyze_scale_factor' THEN kv.value ELSE NULL END) AS analyze_scale_factor
+-- FROM pg_class c
+-- JOIN pg_namespace n ON n.oid = c.relnamespace
+-- LEFT JOIN LATERAL (
+--     SELECT
+--         split_part(opt, '=', 1) AS key,
+--         split_part(opt, '=', 2) AS value
+--     FROM unnest(c.reloptions) AS opt
+-- ) kv ON TRUE
+-- WHERE c.relkind = 'r' -- regular table
+--   AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+-- GROUP BY n.nspname, c.relname
+-- ORDER BY n.nspname, c.relname;
 -- ====================================================================

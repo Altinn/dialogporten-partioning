@@ -14,14 +14,14 @@
 set -euo pipefail # Fail on error, unbound variable, or pipe failure
 
 # --- DATABASE CONNECTION DETAILS (EDIT THESE) ---
-DB_HOST="localhost"
+DB_HOST="host.containers.internal"
 DB_PORT="5432"
-DB_USER="your_user"
-DB_NAME="your_database"
+DB_USER="postgres"
+DB_NAME="dialogporten"
 
 # Set the PGPASSWORD environment variable to avoid password prompts
 # It's recommended to use a .pgpass file for production environments.
-export PGPASSWORD="your_password"
+export PGPASSWORD="supersecret"
 
 # --- TABLE AND CLUSTER KEY CONFIGURATION ---
 # Associative array mapping "TableName" to its "ClusteringKey"
@@ -65,7 +65,7 @@ for table in "${!TABLES_TO_CLUSTER[@]}"; do
     # Construct the pg_repack command
     # The --no-order-by is a legacy alias, --order-by is correct.
     # We use double quotes to handle case-sensitive names.
-    PGREPACK_CMD="pg_repack --host=$DB_HOST --port=$DB_PORT --username=$DB_USER --dbname=$DB_NAME --table=\"public.$table\" --order-by=\"$cluster_key\" --wait-timeout=300"
+    PGREPACK_CMD="pg_repack --host=$DB_HOST --port=$DB_PORT --username=$DB_USER --dbname=$DB_NAME --table='\"public\".\"$table\"' --order-by='\"$cluster_key\"' --wait-timeout=300"
 
     # Execute the command
     if eval "$PGREPACK_CMD"; then

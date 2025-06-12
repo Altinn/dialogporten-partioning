@@ -1,0 +1,45 @@
+This document provides a highly condensed, plain-text representation of the database schema, optimized for machine parsing and minimal token usage.
+
+Notation Guide
+* Structure: TableName(Column1:Type:Constraints...);Indexes
+* Data Types:
+  * uuid, int, bool
+  * ts: timestamp with time zone
+  * vc(n): varchar(n)
+* Constraints & Keys:
+  * pk: Primary Key (for single-column keys)
+  nn: Not Null
+  fk>Table(Col): Foreign Key
+  uniq: Unique constraint/index on a single column
+* Indexes & Composite Keys (at end of line):
+  * pk:col1,col2: Composite Primary Key
+  * uniq:col1,col2: Composite Unique Index
+  * idx:col1,...: Non-unique B-tree index
+  * gin_idx:col: GIN index
+
+Schema Definition
+Dialog(Id:uuid:pk,Revision:uuid:nn,Deleted:bool:nn,DeletedAt:ts,Org:vc(255):nn,ServiceResource:vc(255):nn,ServiceResourceType:vc(255):nn,Party:vc(255):nn,Progress:int,ExtendedStatus:vc(255),ExternalReference:vc(255),VisibleFrom:ts,DueAt:ts,ExpiresAt:ts,StatusId:int:nn:fk>DialogStatus(Id),PrecedingProcess:vc(255),Process:vc(255),IdempotentKey:vc(36),IsApiOnly:bool:nn);idx:StatusId,Org,Party,ServiceResource,DueAt,CreatedAt;uniq:Org,IdempotentKey
+DialogTransmission(Id:uuid:pk,CreatedAt:ts:nn,AuthorizationAttribute:vc(255),ExtendedType:vc(1023),TypeId:int:nn:fk>DialogTransmissionType(Id),DialogId:uuid:nn:fk>Dialog(Id),RelatedTransmissionId:uuid:fk>DialogTransmission(Id),ExternalReference:vc(255));idx:DialogId,TypeId,RelatedTransmissionId
+DialogActivity(Id:uuid:pk,CreatedAt:ts:nn,ExtendedType:vc(1023),TypeId:int:nn:fk>DialogActivityType(Id),DialogId:uuid:nn:fk>Dialog(Id),TransmissionId:uuid:fk>DialogTransmission(Id));idx:DialogId,TypeId,TransmissionId
+Actor(Id:uuid:pk,ActorTypeId:int:nn:fk>ActorType(Id),Discriminator:vc(255):nn,ActivityId:uuid:fk>DialogActivity(Id):uniq,DialogSeenLogId:uuid:fk>DialogSeenLog(Id):uniq,TransmissionId:uuid:fk>DialogTransmission(Id):uniq,LabelAssignmentLogId:uuid:fk>LabelAssignmentLog(Id):uniq,ActorNameEntityId:uuid:fk>ActorName(Id));idx:ActorTypeId,ActorNameEntityId
+ActorName(Id:uuid:pk,ActorId:vc(255),Name:vc(255),CreatedAt:ts:nn);uniq:ActorId,Name
+DialogContent(Id:uuid:pk,MediaType:vc(255):nn,DialogId:uuid:nn:fk>Dialog(Id),TypeId:int:nn:fk>DialogContentType(Id));uniq:DialogId,TypeId
+DialogTransmissionContent(Id:uuid:pk,MediaType:vc(255):nn,TransmissionId:uuid:nn:fk>DialogTransmission(Id),TypeId:int:nn:fk>DialogTransmissionContentType(Id));uniq:TransmissionId,TypeId
+Attachment(Id:uuid:pk,Discriminator:vc(255):nn,DialogId:uuid:fk>Dialog(Id),TransmissionId:uuid:fk>DialogTransmission(Id))
+AttachmentUrl(Id:uuid:pk,MediaType:vc(255),Url:vc(1023):nn,ConsumerTypeId:int:nn:fk>AttachmentUrlConsumerType(Id),AttachmentId:uuid:nn:fk>Attachment(Id))
+DialogGuiAction(Id:uuid:pk,Action:vc(255):nn,Url:vc(1023):nn,AuthorizationAttribute:vc(255),IsDeleteDialogAction:bool:nn,PriorityId:int:nn:fk>DialogGuiActionPriority(Id),HttpMethodId:int:nn:fk>HttpVerb(Id),DialogId:uuid:nn:fk>Dialog(Id))
+DialogApiAction(Id:uuid:pk,Action:vc(255):nn,AuthorizationAttribute:vc(255),DialogId:uuid:nn:fk>Dialog(Id),Name:vc(255))
+DialogApiActionEndpoint(Id:uuid:pk,Version:vc(255),Url:vc(1023):nn,Deprecated:bool:nn,SunsetAt:ts,HttpMethodId:int:nn:fk>HttpVerb(Id),ActionId:uuid:nn:fk>DialogApiAction(Id))
+DialogEndUserContext(Id:uuid:pk,Revision:uuid:nn,DialogId:uuid:fk>Dialog(Id):uniq,SystemLabelId:int:nn:fk>SystemLabel(Id))
+DialogServiceOwnerContext(DialogId:uuid:pk:fk>Dialog(Id),Revision:uuid:nn)
+DialogServiceOwnerLabel(DialogServiceOwnerContextId:uuid:nn:fk>DialogServiceOwnerContext(DialogId),Value:vc(255):nn,CreatedAt:ts:nn);pk:DialogServiceOwnerContextId,Value
+DialogSeenLog(Id:uuid:pk,CreatedAt:ts:nn,IsViaServiceOwner:bool:nn,DialogId:uuid:nn:fk>Dialog(Id),EndUserTypeId:int:nn:fk>DialogUserType(Id))
+DialogSearchTag(Id:uuid:pk,CreatedAt:ts:nn,Value:vc(63):nn,DialogId:uuid:nn:fk>Dialog(Id));gin_idx:Value
+LabelAssignmentLog(Id:uuid:pk,CreatedAt:ts:nn,Name:vc(255):nn,Action:vc(255):nn,ContextId:uuid:nn:fk>DialogEndUserContext(Id))
+LocalizationSet(Id:uuid:pk,Discriminator:vc(255):nn);note:polymorphic_1-to-1_fks
+Localization(LocalizationSetId:uuid:nn:fk>LocalizationSet(Id),LanguageCode:vc(15):nn,Value:vc(4095):nn);pk:LocalizationSetId,LanguageCode;gin_idx:Value
+SubjectResource(Id:uuid:pk,Subject:vc(255):nn,Resource:vc(255):nn);uniq:Resource,Subject
+ResourcePolicyInformation(Id:uuid:pk,Resource:vc(255):nn:uniq,MinimumAuthenticationLevel:int:nn)
+NotificationAcknowledgement(EventId:uuid:nn,NotificationHandler:vc(255):nn,AcknowledgedAt:ts:nn);pk:EventId,NotificationHandler
+LookupTables(Id:int:pk,Name:vc(255):nn);tables:ActorType,DialogStatus,HttpVerb,SystemLabel,DialogUserType,etc
+FrameworkTables;tables:__EFMigrationsHistory,MassTransitInboxState,MassTransitOutboxState,MassTransitOutboxMessage
